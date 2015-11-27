@@ -1,0 +1,508 @@
+/*
+ * (C) Copyright 2011 Samsung Electronics Co. Ltd
+ *
+ * See file CREDITS for list of people who contributed to this
+ * project.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ */
+ 
+#include <config.h>
+#include <version.h>
+#include <asm/arch/cpu.h>
+#include <asm/arch/s5p_nand.h>
+#ifdef CONFIG_EXYNOS4412
+#include "smdk4412_val.h"
+#else
+#include "smdk4212_val.h"
+#endif
+
+_TEXT_BASE:
+	.word	CONFIG_SYS_TEXT_BASE
+
+	.globl cache_init
+cache_init:
+	mrc	p15, 0, r0, c0, c0, 0	@ read main ID register
+	and	r1, r0, #0x00f00000	@ variant
+	and	r2, r0, #0x0000000f	@ revision
+	orr	r2, r2, r1, lsr #20-4	@ combine variant and revision
+	cmp	r2, #0x30
+	mrceq	p15, 0, r0, c1, c0, 1	@ read ACTLR
+	orreq	r0, r0, #0x6		@ Enable DP1(2), DP2(1)
+	mcreq	p15, 0, r0, c1, c0, 1	@ write ACTLR
+	mov pc, lr
+
+	/* Set EMA value for Pegasus-Q Prime */
+set_ema_value:
+	ldr r0, =CHIP_ID_BASE
+	ldr r1, [r0]
+
+	lsr r2, r1, #12
+	ldr r3, =0xE4412
+	cmp r2, r3
+	movne pc, lr
+
+	and r1, r1, #0xff
+	subs r1, r1, #0x20
+	movmi pc, lr
+
+	/* before setting EMA value
+	   SCLK_APLL must be under 200Mhz
+	   iROM sets APLL 400Mhz
+	   so set SCLK_APLL to 200Mhz
+	   by changing APLL_RATIO from 0 to 1 */
+	ldr r0, =0x10044500
+	ldr r1, [r0]
+	orr r1, r1, #0x1000000
+	str r1, [r0]
+
+	ldr r0, =0x10045008
+	ldr r1, =0x00000101
+	str r1, [r0]
+	mov pc, lr
+
+	.globl lowlevel_init
+lowlevel_init:
+
+	/* use iROM stack in bl2 */
+	ldr	sp, =0x02060000
+	push {lr}
+
+	bl set_ema_value
+#if 0
+	/* initialization for CMU_SYSCLK_ISP function */
+	mov	r1, #0
+	ldr	r0, =0x10021174		/* CMU_RESET_ISP_SYS_PWR_REG */
+	str	r1, [r0]
+	ldr	r0, =0x100213B8		/* CMU_SYSCLK_ISP_SYS_PWR_REG */
+	str	r1, [r0]
+
+	/* PS-Hold high */
+	ldr	r0, =0x1002330c
+	ldr	r1, [r0]
+	orr	r1, r1, #0x300
+	str	r1, [r0]
+
+	/* set CP reset to low */
+	ldr	r0, =0x11000C60
+	ldr	r1, [r0]
+	ldr	r2, =0xFFFFFF0F
+	and	r1, r1, r2
+	orr	r1, r1, #0x10
+	str	r1, [r0]
+	ldr	r0, =0x11000C68
+	ldr	r1, [r0]
+	ldr	r2, =0xFFFFFFF3
+	and	r1, r1, r2
+	orr	r1, r1, #0x4
+	str	r1, [r0]
+	ldr	r0, =0x11000C64
+	ldr	r1, [r0]
+	ldr	r2, =0xFFFFFFFD
+	and	r1, r1, r2
+	str	r1, [r0]
+#else
+	/* PS-Hold high */
+	ldr r0, =0x1002330c
+	ldr r1, [r0]
+	orr r1, r1, #0x300 //should reset PSHOLD control only when cold booted.bit[8-9]
+	str r1, [r0]
+
+	/* disable GPX0 pull */
+	ldr r0, =0x11000c08 
+	ldr r1, =0x0
+	str r1, [r0]
+
+	/* Clear  MASK_WDT_RESET_REQUEST  */
+	ldr r0, =0x1002040c
+	ldr r1, =0x00
+	str r1, [r0]
+#endif
+
+	/* During sleep/wakeup or AFTR mode, pmic_init function is not available 
+	 * and it causes delays. So except for sleep/wakeup and AFTR mode, 
+	 * the below function is needed 
+	 */
+	@bl pmic_init
+
+	/* when we already run in ram, we don't need to relocate U-Boot.
+	 * and actually, memory controller must be configured before U-Boot
+	 * is running in ram.
+	 */
+	ldr	r0, =0xff000fff
+	bic	r1, pc, r0		/* r0 <- current base addr of code */
+	ldr	r2, _TEXT_BASE	/* r1 <- original base addr in ram */
+	bic	r2, r2, r0		/* r0 <- current base addr of code */
+	cmp r1, r2			/* compare r0, r1 */
+	beq after_copy		/* r0 == r1 then skip sdram init and u-boot.bin loading */
+
+	/* Read OM pin status */
+	bl read_om
+
+	/* init system clock */
+	bl system_clock_init
+
+	/* Memory initialize */
+	bl mem_ctrl_asm_init_ddr3
+
+	/* Init tzpc */
+	bl tzpc_init
+	bl uart_asm_init
+#if 1
+	ldr r0, =0x41000000
+	mov r1, #0x55
+	str r1, [r0]
+	mov r3,#0
+	ldr r3, [r0]
+	cmp r3, #0x55
+	beq  1f
+	mov r0, #'N'
+	bl    asm_printc
+	b .
+1:
+	mov r0, #'Y'
+	bl    asm_printc
+#endif
+	b load_boot
+
+after_copy:
+#if 1
+	mov r0, #'T'
+	bl asm_printc
+#endif
+	/* set up C2C */	
+	ldr r0, =S5PV310_SYSREG_BASE
+	ldr r2, =GENERAL_CTRL_C2C_OFFSET
+	ldr r1, [r0, r2]
+	ldr r3, =0x4000
+	orr r1, r1, r3
+	str r1, [r0, r2]
+
+#ifdef CONFIG_ENABLE_MMU
+	bl enable_mmu
+#endif
+#if 1
+	mov r0, #'J'
+	bl asm_printc
+#endif
+
+	ldr r0, _board_init_f
+	mov pc, r0
+	
+_board_init_f:
+	.word board_init_f
+
+
+read_om:
+	/* Read booting information */
+	ldr	r0, =S5PV310_POWER_BASE
+	ldr	r1, [r0,#OMR_OFFSET]
+	bic	r2, r1, #0xffffffc1
+
+#ifndef CONFIG_BOOTLOADER_MONITOR
+	/* NAND BOOT */
+@	cmp	r2, #0x0		@ 512B 4-cycle
+@	moveq	r3, #BOOT_NAND
+
+@	cmp	r2, #0x2		@ 2KB 5-cycle
+@	moveq	r3, #BOOT_NAND
+
+@	cmp	r2, #0x4		@ 4KB 5-cycle	8-bit ECC
+@	moveq	r3, #BOOT_NAND
+
+	cmp     r2, #0xA
+	moveq   r3, #BOOT_ONENAND
+
+	cmp	r2, #0x10	@ 2KB 5-cycle	16-bit ECC
+	moveq	r3, #BOOT_NAND
+#endif
+
+	/* SD/MMC BOOT */
+	cmp     r2, #0x4
+	moveq   r3, #BOOT_MMCSD
+
+	/* eMMC BOOT */
+	cmp	r2, #0x6
+	moveq	r3, #BOOT_EMMC
+
+	/* eMMC 4.4 BOOT */
+	cmp	r2, #0x8
+	moveq	r3, #BOOT_EMMC_4_4
+	cmp	r2, #0x28
+	moveq	r3, #BOOT_EMMC_4_4
+
+	ldr	r0, =INF_REG_BASE
+	str	r3, [r0, #INF_REG3_OFFSET]
+
+	mov	pc, lr
+/*
+ * load boot, mmcsd/emmc mode
+ */
+load_boot:
+	ldr	r0, =INF_REG_BASE
+	ldr	r1, [r0, #INF_REG3_OFFSET]
+	cmp 	r1, #BOOT_MMCSD
+	beq 	mmcsd_boot
+	cmp	r1, #BOOT_EMMC
+	beq		emmc_boot
+	cmp	r1, #BOOT_EMMC_4_4
+	beq		emmc_boot_4_4
+	cmp     r1, #BOOT_SEC_DEV
+	beq     mmcsd_boot
+	b .
+
+mmcsd_boot: /*mmcsd boot mode*/
+#if 1
+	mov r0, #'S'
+	bl asm_printc
+	mov r0, #'D'
+	bl asm_printc
+	mov r0, #'P'
+	bl asm_printc
+#endif
+	ldr	r0, =ELFIN_CLOCK_BASE
+	ldr	r2, =CLK_DIV_FSYS2_OFFSET
+	ldr	r1, [r0, r2]
+	orr r1, r1, #0xf
+	str r1, [r0, r2]
+	bl      movi_uboot_copy
+	b       after_copy
+emmc_boot: /* emmc boot mode */
+	ldr	r0, =ELFIN_CLOCK_BASE
+	ldr	r2, =CLK_DIV_FSYS1_OFFSET
+	ldr	r1, [r0, r2]
+	orr r1, r1, #0x3
+	str r1, [r0, r2]
+	bl		emmc_uboot_copy
+	b	    after_copy
+emmc_boot_4_4: /*emmc4.4 boot mode*/
+#if 1
+	mov r0, #'E'
+	bl asm_printc
+	mov r0, #'M'
+	bl asm_printc
+	mov r0, #'M'
+	bl asm_printc
+	mov r0, #'C'
+	bl asm_printc
+	mov r0, #'P'
+	bl asm_printc
+#endif
+	ldr     r0, =ELFIN_CLOCK_BASE
+    ldr     r2, =CLK_DIV_FSYS3_OFFSET
+    ldr     r1, [r0, r2]
+    orr r1, r1, #0x3
+    str r1, [r0, r2]
+	bl      emmc_4_4_uboot_copy
+	b	    after_copy
+/*
+ *  samsung tzpc init
+ */
+tzpc_init:
+	ldr	r0, =ELFIN_TZPC0_BASE
+ 	mov	r1, #0x0
+ 	str	r1, [r0]
+ 	mov	r1, #0xff
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	@@@;;str	  r1, [r0, #TZPC_DECPROT2SET_OFFSET] 	
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET]
+ 	ldr 	r0, =ELFIN_TZPC1_BASE
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT2SET_OFFSET] 	
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET]
+ 	ldr	r0, =ELFIN_TZPC2_BASE
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT2SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET] 
+ 	ldr	r0, =ELFIN_TZPC3_BASE
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT2SET_OFFSET] 	
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET]
+ 	ldr	r0, =ELFIN_TZPC4_BASE
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT2SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET]
+ 	ldr	r0, =ELFIN_TZPC5_BASE
+ 	str	r1, [r0, #TZPC_DECPROT0SET_OFFSET]
+ 	str	r1, [r0, #TZPC_DECPROT1SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT2SET_OFFSET]
+	str	r1, [r0, #TZPC_DECPROT3SET_OFFSET]
+ 	mov	pc, lr 
+
+/*
+ * uart_asm_init: Initialize UART in asm mode, 115200bps fixed.
+ * void uart_asm_init(void)
+ */
+	.globl uart_asm_init
+uart_asm_init:
+
+	/* set GPIO to enable UART */
+	@ GPIO setting for UART for UART0/1/2/3
+	ldr	r0, =0x11400000
+	ldr	r1, =0x22222222
+	str   	r1, [r0]
+	ldr	r0, =0x11400020
+	ldr	r1, =0x222222
+	str   	r1, [r0]
+
+	ldr	r0, =S5PV310_CLOCK_BASE
+	ldr	r1, =CLK_SRC_PERIL0_VAL
+	ldr	r2, =CLK_SRC_PERIL0_OFFSET
+	str	r1, [r0, r2]
+	ldr	r1, =CLK_DIV_PERIL0_VAL
+	ldr	r2, =CLK_DIV_PERIL0_OFFSET
+	str	r1, [r0, r2]
+
+	ldr	r0, =S5PV310_UART_CONSOLE_BASE
+	ldr	r1, =0x111
+	str	r1, [r0, #UFCON_OFFSET]
+
+	mov	r1, #0x3
+	str	r1, [r0, #ULCON_OFFSET]
+
+	ldr	r1, =0x3c5
+	str	r1, [r0, #UCON_OFFSET]
+
+	ldr	r1, =UART_UBRDIV_VAL
+	str	r1, [r0, #UBRDIV_OFFSET]
+
+	ldr	r1, =UART_UDIVSLOT_VAL
+	str	r1, [r0, #UDIVSLOT_OFFSET]
+
+	ldr	r1, =0x4f4f4f4f
+	str	r1, [r0, #UTXH_OFFSET]		@'O'
+
+	mov	pc, lr
+
+	.globl asm_printc
+asm_printc:
+	push {r1, lr}
+	ldr r1, =S5PV310_UART_CONSOLE_BASE
+	str r0, [r1, #UTXH_OFFSET]
+	pop {r1, pc}
+
+#ifdef CONFIG_ENABLE_MMU
+enable_mmu:
+	/* enable domain access */
+	ldr	r5, =0x0000ffff
+	mcr	p15, 0, r5, c3, c0, 0		@load domain access register
+
+	/* Set the TTB register */
+	ldr	r0, =mmu_table
+	ldr	r1, =CONFIG_PHY_UBOOT_BASE
+	ldr	r2, =0xfff00000
+	bic	r0, r0, r2
+	orr	r1, r0, r1
+	mcr	p15, 0, r1, c2, c0, 0
+
+	/* Enable the MMU */
+mmu_on:
+	mrc	p15, 0, r0, c1, c0, 0
+	orr	r0, r0, #1
+	mcr	p15, 0, r0, c1, c0, 0
+	nop
+	nop
+	nop
+	nop
+	mov	pc, lr
+
+/*
+ * we assume that cache operation is done before. (eg. cleanup_before_linux())
+ * actually, we don't need to do anything about cache if not use d-cache in U-Boot
+ * So, in this function we clean only MMU. by scsuh
+ *
+ * void	theLastJump(void *kernel, int arch_num, uint boot_params);
+ */
+	.globl theLastJump
+theLastJump:
+	mov	r9, r0
+	ldr	r3, =0xfff00000
+	ldr	r4, =CONFIG_PHY_UBOOT_BASE
+	adr	r5, phy_last_jump
+	bic	r5, r5, r3
+	orr	r5, r5, r4
+	mov	pc, r5
+phy_last_jump:
+	/*
+	 * disable MMU stuff
+	 */
+	mrc	p15, 0, r0, c1, c0, 0
+	bic	r0, r0, #0x00002300	/* clear bits 13, 9:8 (--V- --RS) */
+	bic	r0, r0, #0x00000087	/* clear bits 7, 2:0 (B--- -CAM) */
+	orr	r0, r0, #0x00000002	/* set bit 2 (A) Align */
+	orr	r0, r0, #0x00001000	/* set bit 12 (I) I-Cache */
+	mcr	p15, 0, r0, c1, c0, 0
+
+	mcr	p15, 0, r0, c8, c7, 0	/* flush v4 TLB */
+
+	mov	r0, #0
+	mov	pc, r9
+
+/*
+ * MMU Table for SMDKC210
+ * 0x0000_0000 -- 0x1FFF_FFFF => A:0x0000_0000 -- 0x1FFF_FFFF
+ * 0x2000_0000 -- 0x3FFF_FFFF => Not Allowed
+ * 0x4000_0000 -- 0x5FFF_FFFF => A:0x4000_0000 -- 0x5FFF_FFFF
+ * 0x6000_0000 -- 0xBFFF_FFFF => Not Allowed
+ * 0xC000_0000 -- 0xDFFF_FFFF => A:0x4000_0000 -- 0X5FFF_FFFF
+ * 0xE000_0000 -- 0xFFFF_FFFF => Not Allowed
+ */
+
+	/* form a first-level section entry */
+.macro FL_SECTION_ENTRY base,ap,d,c,b
+	.word (\base << 20) | (\ap << 10) | \
+	      (\d << 5) | (1<<4) | (\c << 3) | (\b << 2) | (1<<1)
+.endm
+
+.section .mmudata, "a"
+	.align 14
+	// the following alignment creates the mmu table at address 0x4000.
+	.globl mmu_table
+mmu_table:
+	.set __base,0
+	// Access for iRAM
+	.rept 0x200
+	FL_SECTION_ENTRY __base,3,0,0,0
+	.set __base,__base+1
+	.endr
+
+	// Not Allowed
+	.rept 0x400 - 0x200
+	.word 0x00000000
+	.endr
+
+	.set __base,0x400
+	// 512MB for SDRAM with cacheable
+	.rept 0x600 - 0x400
+	FL_SECTION_ENTRY __base,3,0,1,1
+	.set __base,__base+1
+	.endr
+	
+	// access is not allowed.
+	.rept 0xc00 - 0x600
+	.word 0x00000000
+	.endr
+
+	.set __base,0x400
+	// 512MB for SDRAM with cacheable
+	.rept 0xE00 - 0xC00
+	FL_SECTION_ENTRY __base,3,0,1,1
+	.set __base,__base+1
+	.endr
+
+	// access is not allowed.
+	.rept 0x1000 - 0xE00
+	.word 0x00000000
+	.endr
+	
+#endif
+
+
