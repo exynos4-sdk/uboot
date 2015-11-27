@@ -27,7 +27,7 @@ SOURCES = $(OBJECTS:.o=.c)
 all:
 	$(CC) $(CFLAGS)	mkbl2 V310-EVT1-mkbl2.c 
 	$(CC) $(CFLAGS)	sd_fdisk sd_fdisk.c
-
+	$(CC) $(CFLAGS)	add_padding add_padding.c
 #---------------------------------------------------------------------------------------
 .c.o:
 		$(CC) $(CFLAGS) -c $< -o $@
@@ -37,9 +37,10 @@ dep:
 
 #---------------------------------------------------------------------------------------
 clean:
-		$(RM)		-rf sd_fdisk
-		$(RM)		-rf mkbl2
-
+		@$(RM)		-rf sd_fdisk
+		@$(RM)		-rf mkbl2
+		@$(RM)		-rf add_padding
+		
 new:
 		$(MAKE)		clean
 		$(MAKE)

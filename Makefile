@@ -344,7 +344,7 @@ $(obj)u-boot.hex:	$(obj)u-boot
 $(obj)u-boot.srec:	$(obj)u-boot
 		$(OBJCOPY) -O srec $< $@
 
-$(obj)u-boot.bin:	$(obj)u-boot
+$(obj)u-boot.bin:	$(obj)u-boot $(obj)add_padding
 		$(OBJCOPY) ${OBJCFLAGS} -O binary $< $@
 		$(BOARD_SIZE_CHECK)
 ifeq ($(CONFIG_S5PC210),y)
@@ -354,6 +354,12 @@ endif
 ifeq ($(CONFIG_CPU_EXYNOS5250),y)
 		./mkbl2 u-boot.bin bl2.bin 14336
 endif
+ifeq ($(CONFIG_SECURE_SMC),y)
+		./add_padding bl2.bin 16384
+endif
+$(obj)add_padding: $(TOPDIR)/sd_fuse
+		$(MAKE) -C $^
+		@cp $</$@ .
 
 $(obj)u-boot.ldr:	$(obj)u-boot
 		$(CREATE_LDR_ENV)
@@ -1219,6 +1225,7 @@ $(NIOS2_GENERIC:%=%_config) : unconfig
 #########################################################################
 
 clean:
+	@$(MAKE) -C $(TOPDIR)/sd_fuse/ clean
 	@rm -f $(obj)examples/standalone/82559_eeprom			  \
 	       $(obj)examples/standalone/atmel_df_pow2			  \
 	       $(obj)examples/standalone/eepro100_eeprom		  \
@@ -1256,10 +1263,14 @@ clean:
 		\( -name 'core' -o -name '*.bak' -o -name '*~' \
 		-o -name '*.o'	-o -name '*.a' -o -name '*.exe'	\) -print \
 		| xargs rm -f
+	@find $(OBJTREE) -type f  -name add_padding -print \
+		| xargs rm -f 
+		
 
 clobber:	clean
 	@find $(OBJTREE) -type f \( -name '*.depend' \
 		-o -name '*.srec' -o -name '*.bin' -o -name u-boot.img \) \
+		-path "sd_fuse" \
 		-print0 \
 		| xargs -0 rm -f
 	@rm -f $(OBJS) $(obj)*.bak $(obj)ctags $(obj)etags $(obj)TAGS \
